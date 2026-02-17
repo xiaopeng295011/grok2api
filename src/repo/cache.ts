@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { dbAll, dbFirst, dbRun } from "../db";
+import { dbAll, dbFirst, dbRun, D1_BATCH_SIZE } from "../db";
 
 export type CacheType = "image" | "video";
 
@@ -38,8 +38,12 @@ export async function deleteCacheRow(db: Env["DB"], key: string): Promise<void> 
 
 export async function deleteCacheRows(db: Env["DB"], keys: string[]): Promise<void> {
   if (!keys.length) return;
-  const placeholders = keys.map(() => "?").join(",");
-  await dbRun(db, `DELETE FROM kv_cache WHERE key IN (${placeholders})`, keys);
+  // 分批处理，避免 IN 子句参数过多
+  for (let i = 0; i < keys.length; i += D1_BATCH_SIZE) {
+    const batch = keys.slice(i, i + D1_BATCH_SIZE);
+    const placeholders = batch.map(() => "?").join(",");
+    await dbRun(db, `DELETE FROM kv_cache WHERE key IN (${placeholders})`, batch);
+  }
 }
 
 export async function getCacheSizeBytes(db: Env["DB"]): Promise<{ image: number; video: number; total: number }> {

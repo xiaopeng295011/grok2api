@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { dbAll, dbFirst, dbRun } from "../db";
+import { dbAll, dbFirst, dbRun, batchExecute, D1_BATCH_SIZE } from "../db";
 import { generateApiKey } from "../utils/crypto";
 import { nowMs } from "../utils/time";
 
@@ -77,16 +77,15 @@ export async function batchAddApiKeys(
       video_limit: -1,
     });
   }
-  const batch = db.batch(
-    rows.map((r) =>
-      db
-        .prepare(
-          "INSERT INTO api_keys(key,name,created_at,is_active,chat_limit,heavy_limit,image_limit,video_limit) VALUES(?,?,?,1,?,?,?,?)",
-        )
-        .bind(r.key, r.name, r.created_at, r.chat_limit, r.heavy_limit, r.image_limit, r.video_limit),
-    ),
+  const stmts = rows.map((r) =>
+    db
+      .prepare(
+        "INSERT INTO api_keys(key,name,created_at,is_active,chat_limit,heavy_limit,image_limit,video_limit) VALUES(?,?,?,1,?,?,?,?)",
+      )
+      .bind(r.key, r.name, r.created_at, r.chat_limit, r.heavy_limit, r.image_limit, r.video_limit),
   );
-  await batch;
+  // 分批执行，避免 D1 "too many SQL variables" 错误
+  await batchExecute(db, stmts, D1_BATCH_SIZE);
   return rows;
 }
 
@@ -99,10 +98,16 @@ export async function deleteApiKey(db: Env["DB"], key: string): Promise<boolean>
 
 export async function batchDeleteApiKeys(db: Env["DB"], keys: string[]): Promise<number> {
   if (!keys.length) return 0;
-  const placeholders = keys.map(() => "?").join(",");
-  const before = await dbFirst<{ c: number }>(db, `SELECT COUNT(1) as c FROM api_keys WHERE key IN (${placeholders})`, keys);
-  await dbRun(db, `DELETE FROM api_keys WHERE key IN (${placeholders})`, keys);
-  return before?.c ?? 0;
+  // 分批处理，避免 IN 子句参数过多
+  let totalDeleted = 0;
+  for (let i = 0; i < keys.length; i += D1_BATCH_SIZE) {
+    const batch = keys.slice(i, i + D1_BATCH_SIZE);
+    const placeholders = batch.map(() => "?").join(",");
+    const before = await dbFirst<{ c: number }>(db, `SELECT COUNT(1) as c FROM api_keys WHERE key IN (${placeholders})`, batch);
+    await dbRun(db, `DELETE FROM api_keys WHERE key IN (${placeholders})`, batch);
+    totalDeleted += before?.c ?? 0;
+  }
+  return totalDeleted;
 }
 
 export async function updateApiKeyStatus(db: Env["DB"], key: string, is_active: boolean): Promise<boolean> {
@@ -118,10 +123,16 @@ export async function batchUpdateApiKeyStatus(
   is_active: boolean,
 ): Promise<number> {
   if (!keys.length) return 0;
-  const placeholders = keys.map(() => "?").join(",");
-  const before = await dbFirst<{ c: number }>(db, `SELECT COUNT(1) as c FROM api_keys WHERE key IN (${placeholders})`, keys);
-  await dbRun(db, `UPDATE api_keys SET is_active = ? WHERE key IN (${placeholders})`, [is_active ? 1 : 0, ...keys]);
-  return before?.c ?? 0;
+  // 分批处理，避免 IN 子句参数过多
+  let totalUpdated = 0;
+  for (let i = 0; i < keys.length; i += D1_BATCH_SIZE) {
+    const batch = keys.slice(i, i + D1_BATCH_SIZE);
+    const placeholders = batch.map(() => "?").join(",");
+    const before = await dbFirst<{ c: number }>(db, `SELECT COUNT(1) as c FROM api_keys WHERE key IN (${placeholders})`, batch);
+    await dbRun(db, `UPDATE api_keys SET is_active = ? WHERE key IN (${placeholders})`, [is_active ? 1 : 0, ...batch]);
+    totalUpdated += before?.c ?? 0;
+  }
+  return totalUpdated;
 }
 
 export async function updateApiKeyName(db: Env["DB"], key: string, name: string): Promise<boolean> {

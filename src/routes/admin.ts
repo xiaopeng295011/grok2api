@@ -45,7 +45,7 @@ import {
   listOldestRows,
   type CacheType,
 } from "../repo/cache";
-import { dbAll, dbFirst, dbRun } from "../db";
+import { dbAll, dbFirst, dbRun, batchExecute, D1_BATCH_SIZE } from "../db";
 import { nowMs } from "../utils/time";
 import { listUsageForDay, localDayString } from "../repo/apiKeyUsage";
 
@@ -684,19 +684,22 @@ adminRoutes.post("/api/v1/admin/tokens", requireAdminAuth, async (c) => {
       }
     }
 
-    // Delete tokens removed from the posted pools
+    // Delete tokens removed from the posted pools - 分批处理避免 IN 子句参数过多
     for (const tokenType of ["sso", "ssoSuper"] as const) {
       const existing = byType[tokenType];
       const desired = desiredByType[tokenType];
       const toDel: string[] = [];
       for (const t of existing) if (!desired.has(t)) toDel.push(t);
-      if (toDel.length) {
-        const placeholders = toDel.map(() => "?").join(",");
-        stmts.push(c.env.DB.prepare(`DELETE FROM tokens WHERE token_type = ? AND token IN (${placeholders})`).bind(tokenType, ...toDel));
+      // 分批删除，避免 D1 "too many SQL variables" 错误
+      for (let i = 0; i < toDel.length; i += D1_BATCH_SIZE) {
+        const batch = toDel.slice(i, i + D1_BATCH_SIZE);
+        const placeholders = batch.map(() => "?").join(",");
+        stmts.push(c.env.DB.prepare(`DELETE FROM tokens WHERE token_type = ? AND token IN (${placeholders})`).bind(tokenType, ...batch));
       }
     }
 
-    if (stmts.length) await c.env.DB.batch(stmts);
+    // 分批执行，避免 D1 "too many SQL variables" 错误
+    if (stmts.length) await batchExecute(c.env.DB, stmts, D1_BATCH_SIZE);
     return c.json(legacyOk({ message: "Token 已更新" }));
   } catch (e) {
     return c.json(legacyErr(`Update tokens failed: ${e instanceof Error ? e.message : String(e)}`), 500);
@@ -717,15 +720,20 @@ adminRoutes.post("/api/v1/admin/tokens/refresh", requireAdminAuth, async (c) => 
     const settings = await getSettings(c.env);
     const cf = normalizeCfCookie(settings.grok.cf_clearance ?? "");
 
-    const placeholders = unique.map(() => "?").join(",");
-    const typeRows = placeholders
-      ? await dbAll<{ token: string; token_type: string }>(
-          c.env.DB,
-          `SELECT token, token_type FROM tokens WHERE token IN (${placeholders})`,
-          unique,
-        )
-      : [];
-    const tokenTypeByToken = new Map(typeRows.map((r) => [r.token, r.token_type]));
+    // 分批查询，避免 IN 子句参数过多
+    const tokenTypeByToken = new Map<string, string>();
+    for (let i = 0; i < unique.length; i += D1_BATCH_SIZE) {
+      const batch = unique.slice(i, i + D1_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(",");
+      const typeRows = await dbAll<{ token: string; token_type: string }>(
+        c.env.DB,
+        `SELECT token, token_type FROM tokens WHERE token IN (${placeholders})`,
+        batch,
+      );
+      for (const r of typeRows) {
+        tokenTypeByToken.set(r.token, r.token_type);
+      }
+    }
 
     const results: Record<string, boolean> = {};
     for (const t of unique) {

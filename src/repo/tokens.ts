@@ -1,5 +1,5 @@
 import type { Env } from "../env";
-import { dbAll, dbFirst, dbRun } from "../db";
+import { dbAll, dbFirst, dbRun, batchExecute, D1_BATCH_SIZE } from "../db";
 import { nowMs } from "../utils/time";
 
 export type TokenType = "sso" | "ssoSuper";
@@ -108,21 +108,29 @@ export async function addTokens(db: Env["DB"], tokens: string[], token_type: Tok
       )
       .bind(t, token_type, now, -1, -1),
   );
-  await db.batch(stmts);
+  // 分批执行，避免 D1 "too many SQL variables" 错误
+  await batchExecute(db, stmts, D1_BATCH_SIZE);
   return cleaned.length;
 }
 
 export async function deleteTokens(db: Env["DB"], tokens: string[], token_type: TokenType): Promise<number> {
   const cleaned = tokens.map((t) => t.trim()).filter(Boolean);
   if (!cleaned.length) return 0;
-  const placeholders = cleaned.map(() => "?").join(",");
-  const before = await dbFirst<{ c: number }>(
-    db,
-    `SELECT COUNT(1) as c FROM tokens WHERE token_type = ? AND token IN (${placeholders})`,
-    [token_type, ...cleaned],
-  );
-  await dbRun(db, `DELETE FROM tokens WHERE token_type = ? AND token IN (${placeholders})`, [token_type, ...cleaned]);
-  return before?.c ?? 0;
+
+  // 分批处理，避免 IN 子句参数过多
+  let totalDeleted = 0;
+  for (let i = 0; i < cleaned.length; i += D1_BATCH_SIZE) {
+    const batch = cleaned.slice(i, i + D1_BATCH_SIZE);
+    const placeholders = batch.map(() => "?").join(",");
+    const before = await dbFirst<{ c: number }>(
+      db,
+      `SELECT COUNT(1) as c FROM tokens WHERE token_type = ? AND token IN (${placeholders})`,
+      [token_type, ...batch],
+    );
+    await dbRun(db, `DELETE FROM tokens WHERE token_type = ? AND token IN (${placeholders})`, [token_type, ...batch]);
+    totalDeleted += before?.c ?? 0;
+  }
+  return totalDeleted;
 }
 
 export async function updateTokenTags(db: Env["DB"], token: string, token_type: TokenType, tags: string[]): Promise<void> {
