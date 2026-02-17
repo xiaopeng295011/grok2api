@@ -13,14 +13,12 @@ region = "aws:us-east-1"
 [[d1_databases]]
 binding = "DB"
 database_name = "grok2api"
-# Filled by CI / your first deployment bootstrap.
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "afdfdeaa-c1c8-484a-8995-4a4c873b5be6"
 migrations_dir = "migrations"
 
 [[kv_namespaces]]
 binding = "KV_CACHE"
-# Filled by CI / your first deployment bootstrap.
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "c2fde24589e24d69b4051ca20816c287"
 
 # Durable Objects migrations history:
 # - do-v1 created AutoRegisterJob (now removed)
